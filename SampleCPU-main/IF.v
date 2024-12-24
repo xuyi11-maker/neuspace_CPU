@@ -1,7 +1,7 @@
 `include "lib/defines.vh"
 module IF(
-    input wire clk,           //Ê±ÖÓÐÅºÅ
-    input wire rst,           //¸´Î»ÐÅºÅ
+    input wire clk,           //??????
+    input wire rst,           //??ï¿½ï¿½???
     input wire [`StallBus-1:0] stall,
 
     // input wire flush,
