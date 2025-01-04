@@ -1,54 +1,72 @@
 `include "lib/defines.vh"
-//CPU流水线中的执行阶段（EX阶段），负责执行算术逻辑运算（ALU操作）、乘法、除法等操作，并将结果传递到下一个阶段（MEM阶段）
+//在原始代码的基础上，新增了对乘法和除法指令的支持，增加了对高位（HI）和低位（LO）寄存器的读写控制逻辑，
+//并增加了对加载指令的判断逻辑。同时，修改了部分信号的选择逻辑和输出信号的生成逻辑，以支持新增的功能。
+//这些修改使得执行阶段（EX）能够处理更多的指令类型，并能够正确地生成控制信号和数据信号，传递给后续的流水线阶段。
 module EX(
-    input wire clk,//时钟信号
-    input wire rst,//复位信号
+    input wire clk,
+    input wire rst,
 
-    input wire [`StallBus-1:0] stall,//流水线暂停信号
+    input wire [`StallBus-1:0] stall,
 
-    input wire [`ID_TO_EX_WD-1:0] id_to_ex_bus,//从id传递到ex阶段的总线信号
+    input wire [`ID_TO_EX_WD-1:0] id_to_ex_bus,//总线信号
 
-    output wire [`EX_TO_MEM_WD-1:0] ex_to_mem_bus,//从ex传递到mem阶段的总线信号
+    output wire [`EX_TO_MEM_WD-1:0] ex_to_mem_bus,
+    
+    output wire [37:0] ex_to_id_bus,
 
     output wire data_sram_en,//数据存储器使能信号
-    output wire [3:0] data_sram_wen,//数据存储器写使能信号
-    output wire [31:0] data_sram_addr,//数据存储器地址
-    output wire [31:0] data_sram_wdata//数据存储器写数据
-);
-    //内置寄存器
-    reg [`ID_TO_EX_WD-1:0] id_to_ex_bus_r;//存储从id传递到ex阶段总线信号
+    output wire [3:0] data_sram_wen,
+    output wire [31:0] data_sram_addr,
+    output wire [31:0] data_sram_wdata,
+    output wire inst_is_load,//当前指令是否为加载指令
 
-    //在时钟上升沿或复位时更新id_to_ex_bus_r
+    output wire stallreq_for_ex,
+    output wire [65:0] ex_to_mem1,//传递到mem阶段的额外信号
+    output wire [65:0] ex_to_id_2,
+    output wire ready_ex_to_id//ex阶段完成信号
+);
+    //内部寄存器
+    reg [`ID_TO_EX_WD-1:0] id_to_ex_bus_r;
+//时钟上沿或复位更新
     always @ (posedge clk) begin
         if (rst) begin
-            id_to_ex_bus_r <= `ID_TO_EX_WD'b0;//复位时清零
+            id_to_ex_bus_r <= `ID_TO_EX_WD'b0;//复位清0
         end
-
         else if (stall[2]==`Stop && stall[3]==`NoStop) begin
-            id_to_ex_bus_r <= `ID_TO_EX_WD'b0;//ex阶段暂停时候清零
+            id_to_ex_bus_r <= `ID_TO_EX_WD'b0;//暂停清0
         end
         else if (stall[2]==`NoStop) begin
-            id_to_ex_bus_r <= id_to_ex_bus;//ex阶段不暂停的时候更新总线信号
+            id_to_ex_bus_r <= id_to_ex_bus;//正常更新
         end
     end
-    //从id_to_ex_bus_r中提取各个控制信号和数据
-    wire [31:0] ex_pc, inst;//当前指令pc值和指令内容
-    wire [11:0] alu_op;//alu操作码
-    wire [2:0] sel_alu_src1;//alu源操作数1选择信号
-    wire [3:0] sel_alu_src2;//alu源操作数2选择信号
+    //从id到ex总线提取各个控制信号数据
+    wire [31:0] ex_pc, inst;//当前pc值和指令内容
+    wire [11:0] alu_op;
+    wire [2:0] sel_alu_src1;
+    wire [3:0] sel_alu_src2;
     wire data_ram_en;//数据存储器使能信号
-    wire [3:0] data_ram_wen;//数据存储器写使能信号
+    wire [3:0] data_ram_wen;
+    wire [3:0] data_ram_read;
     wire rf_we;//寄存器文件写使能信号
-    wire [4:0] rf_waddr;//寄存器文件写地址
-    wire sel_rf_res;//寄存器文件结果选择信号
-    wire [31:0] rf_rdata1, rf_rdata2;//寄存器文件读数据1 和读数据2
+    wire [4:0] rf_waddr;
+    wire sel_rf_res;
+    wire [31:0] rf_rdata1, rf_rdata2;//读数据1，2
     reg is_in_delayslot;//是否在延迟槽中
-
-    // 将id_to_ex_bus_r中的信号分解到各个变量
+    wire [1:0] lo_hi_r;//高低位读信号
+    wire [1:0] lo_hi_w;
+    wire w_hi_we;//写使能
+    wire w_lo_we;
+    wire w_hi_we3;//来自id段
+    wire w_lo_we3;
+    wire [31:0] hi_i;//高输入数据
+    wire [31:0] lo_i;
+    wire[31:0] hi_o;//高输出数据
+    wire[31:0] lo_o;
+//信号分解
     assign {
-        ex_pc,          // 148:117
-        inst,           // 116:85
-        alu_op,         // 84:83
+        ex_pc,          // 158:127
+        inst,           // 126:95
+        alu_op,         // 94:83
         sel_alu_src1,   // 82:80
         sel_alu_src2,   // 79:76
         data_ram_en,    // 75
@@ -56,39 +74,66 @@ module EX(
         rf_we,          // 70
         rf_waddr,       // 69:65
         sel_rf_res,     // 64
-        rf_rdata1,         // 63:32
-        rf_rdata2          // 31:0
+        rf_rdata1,      // 63:32
+        rf_rdata2,      // 31:0
+        lo_hi_r,        
+        lo_hi_w,        
+        lo_o,           
+        hi_o,           
+        data_ram_read   //数据存储器读信号
     } = id_to_ex_bus_r;
-
+    //根据高低位信号生成高位和低位寄存器写使能信号
+    assign w_lo_we3 = lo_hi_w[0]==1'b1 ? 1'b1:1'b0;
+    assign w_hi_we3 = lo_hi_w[1]==1'b1 ? 1'b1:1'b0;
+    
+    assign inst_is_load =  (inst[31:26] == 6'b10_0011) ? 1'b1 :1'b0;
     //立即数扩展
     wire [31:0] imm_sign_extend, imm_zero_extend, sa_zero_extend;
     assign imm_sign_extend = {{16{inst[15]}},inst[15:0]};//符号扩展
     assign imm_zero_extend = {16'b0, inst[15:0]};//0扩展
     assign sa_zero_extend = {27'b0,inst[10:6]};//移位量扩展
-
-    //alu源操作数选择
+    //ALU源操作数选择
     wire [31:0] alu_src1, alu_src2;
     wire [31:0] alu_result, ex_result;
 
-    assign alu_src1 = sel_alu_src1[1] ? ex_pc ://选pc
-                      sel_alu_src1[2] ? sa_zero_extend : //选移位量
+    assign alu_src1 = sel_alu_src1[1] ? ex_pc ://pc
+                      sel_alu_src1[2] ? sa_zero_extend : //移位量
                       rf_rdata1;//默认选择寄存器文件读数据1
 
-    assign alu_src2 = sel_alu_src2[1] ? imm_sign_extend ://选符号扩展的立即数
-                      sel_alu_src2[2] ? 32'd8 ://选常数8
-                      sel_alu_src2[3] ? imm_zero_extend : //选0扩展的立即数
+    assign alu_src2 = sel_alu_src2[1] ? imm_sign_extend ://符号扩展立即数
+                      sel_alu_src2[2] ? 32'd8 ://常数8
+                      sel_alu_src2[3] ? imm_zero_extend : //0扩展立即数
                       rf_rdata2;
-    //alu实例化
+    
     alu u_alu(
     	.alu_control (alu_op ),
         .alu_src1    (alu_src1    ),
         .alu_src2    (alu_src2    ),
         .alu_result  (alu_result  )
     );
-
-    assign ex_result = alu_result;//ex结果直接使用alu结果
-
-    //ex结果传递到mem
+//ex结果选择
+    assign ex_result =  lo_hi_r[0] ? lo_o ://低位输出
+                         lo_hi_r[1] ? hi_o :
+                         alu_result;
+    //数据存储器控制信号生成
+    assign data_sram_en = data_ram_en ;//使能信号
+    assign data_sram_wen = (data_ram_read==4'b0101 && ex_result[1:0] == 2'b00 )? 4'b0001: 
+                            (data_ram_read==4'b0101 && ex_result[1:0] == 2'b01 )? 4'b0010:
+                            (data_ram_read==4'b0101 && ex_result[1:0] == 2'b10 )? 4'b0100:
+                            (data_ram_read==4'b0101 && ex_result[1:0] == 2'b11 )? 4'b1000:
+                            (data_ram_read==4'b0111 && ex_result[1:0] == 2'b00 )? 4'b0011:
+                            (data_ram_read==4'b0111 && ex_result[1:0] == 2'b10 )? 4'b1100:
+                            data_ram_wen;
+    assign data_sram_addr = ex_result ;//data存储地址
+    assign data_sram_wdata = data_sram_wen==4'b1111 ? rf_rdata2 : //根据写使能信号生成写数据
+                              data_sram_wen==4'b0001 ? {24'b0,rf_rdata2[7:0]} :
+                              data_sram_wen==4'b0010 ? {16'b0,rf_rdata2[7:0],8'b0} :
+                              data_sram_wen==4'b0100 ? {8'b0,rf_rdata2[7:0],16'b0} :
+                              data_sram_wen==4'b1000 ? {rf_rdata2[7:0],24'b0} :
+                              data_sram_wen==4'b0011 ? {16'b0,rf_rdata2[15:0]} :
+                              data_sram_wen==4'b1100 ? {rf_rdata2[15:0],16'b0} :
+                              32'b0;
+    
     assign ex_to_mem_bus = {
         ex_pc,          // 75:44
         data_ram_en,    // 43
@@ -96,46 +141,127 @@ module EX(
         sel_rf_res,     // 38
         rf_we,          // 37
         rf_waddr,       // 36:32
+        ex_result,      // 31:0
+        data_ram_read
+    };
+   
+    assign ex_to_id_bus = {
+        rf_we,          // 37
+        rf_waddr,       // 36:32
         ex_result       // 31:0
     };
+    //*/指令
+    wire w_hi_we1;
+    wire w_lo_we1;
+    wire mult;
+    wire multu;
+    //有符号*
+    assign mult = (inst[31:26] == 6'b00_0000) & (inst[15:6] == 10'b0000000000) & (inst[5:0] == 6'b01_1000);
+    //无符号*
+    assign multu= (inst[31:26] == 6'b00_0000) & (inst[15:6] == 10'b0000000000) & (inst[5:0] == 6'b01_1001);
+    assign w_hi_we1 = mult | multu ;//高位寄存器写使能
+    assign w_lo_we1 = mult | multu ;
+    
+    // 乘法器逻辑
+    reg judge;//状态判断
+    reg [31:0] multiplier;
+    wire [63:0] temporary_value;
+    reg [63:0] mul_temporary;
+    reg result_sign;
+    //乘法器状态判断逻辑
+    always @(posedge clk) begin
+        if (!(mult | multu) || mul_ready_i) begin
+            judge <= 1'b0;//未进行或已完成
+        end
+        else begin
+            judge <= 1'b1;//进行中
+        end
+    end
+    //乘法操作数符号和绝对值计算
+    wire op1_sign;
+    wire op2_sign;
+    wire [31:0] op1_absolute;
+    wire [31:0] op2_absolute;
+    assign op1_sign = mult & rf_rdata1[31];
+    assign op2_sign = mult & rf_rdata2[31];
+    assign op1_absolute = op1_sign ? (~rf_rdata1+1) : rf_rdata1;
+    assign op2_absolute = op2_sign ? (~rf_rdata2+1) : rf_rdata2;
+    //乘法器逻辑
+    reg [63:0] multiplicand;//被乘数
+    always @ (posedge clk) begin 
+        if (judge) begin
+            multiplicand <= {multiplicand[62:0],1'b0};//左移
+        end
+        else if (mult | multu) begin
+            multiplicand <= {32'd0, op1_absolute};//初始化被乘数
+        end
+    end
 
-    // MUL part
+    always @ (posedge clk) begin 
+        if (judge) begin
+            multiplier <= {1'b0, multiplier[31:1]};//右移
+        end
+        else if (mult | multu) begin
+            multiplier <= op2_absolute;//初始化乘数
+        end
+    end
+
+    assign temporary_value = multiplier[0] ? multiplicand : 64'd0;//临时值计算
+
+    always @ (posedge clk) begin
+        if (judge) begin
+            mul_temporary <= mul_temporary + temporary_value;//乘法累加
+        end      
+        else if (mult | multu) begin
+            mul_temporary <= 64'd0;//初始化乘法临时结果
+        end
+    end
+
+    always @ (posedge clk) begin
+        if (judge) begin
+            result_sign <= op1_sign ^ op2_sign;//结果符号计算
+        end
+    end
+
     wire [63:0] mul_result;
-    wire mul_signed; // 有符号乘法标记
-
-    mul u_mul(
-    	.clk        (clk            ),
-        .resetn     (~rst           ),//复位信号（低电平有效）
-        .mul_signed (mul_signed     ),
-        .ina        (      ), // 乘法源操作数1
-        .inb        (      ), // 乘法源操作数2
-        .result     (mul_result     ) // 乘法结果 64bit
-    );
+    wire mul_ready_i;
+    assign mul_result = result_sign ? (~mul_temporary+1) : mul_temporary;//结果符号处理
+    assign mul_ready_i = judge & multiplier == 32'b0;//完成判断
 
     // DIV part
     wire [63:0] div_result;
-    wire inst_div, inst_divu;//除法指令信号
-    wire div_ready_i;//除法结果就绪信号
-    reg stallreq_for_div;//流水线暂停请求
-    assign stallreq_for_ex = stallreq_for_div;//将请求传递到ex阶段
+    wire inst_div, inst_divu;
+    wire div_ready_i;
+    reg stallreq_for_div;
+    wire w_hi_we2;//高位R写使能
+    wire w_lo_we2;
+    assign stallreq_for_ex = (stallreq_for_div & div_ready_i==1'b0) | ((mult | multu) & mul_ready_i==1'b0);
+    assign ready_ex_to_id = div_ready_i | mul_ready_i;
+    
+    //有符号/
+    assign inst_div = (inst[31:26] == 6'b00_0000) & (inst[15:6] == 10'b0000000000) & (inst[5:0] == 6'b01_1010);
+    //无符号/
+    assign inst_divu= (inst[31:26] == 6'b00_0000) & (inst[15:6] == 10'b0000000000) & (inst[5:0] == 6'b01_1011);
+    assign w_hi_we2 = inst_div | inst_divu;//高位R写使能
+    assign w_lo_we2 = inst_div | inst_divu;
 
-    reg [31:0] div_opdata1_o;//除法操作数1
+    reg [31:0] div_opdata1_o;
     reg [31:0] div_opdata2_o;
-    reg div_start_o;//除法启动信号
-    reg signed_div_o;//有符号除法标记
+    reg div_start_o;
+    reg signed_div_o;
 
     div u_div(
     	.rst          (rst          ),
         .clk          (clk          ),
-        .signed_div_i (signed_div_o ),
+        .signed_div_i (signed_div_o ),//有符号除法标记
         .opdata1_i    (div_opdata1_o    ),
         .opdata2_i    (div_opdata2_o    ),
-        .start_i      (div_start_o      ),
-        .annul_i      (1'b0      ),//除法取消信号
-        .result_o     (div_result     ), // 除法结果 64bit
+        .start_i      (div_start_o      ),//开始信号
+        .annul_i      (1'b0      ),//取消信号
+        .result_o     (div_result     ),
         .ready_o      (div_ready_i      )
     );
-    // 根据除法指令设置除法操作数和控制信号
+
     always @ (*) begin
         if (rst) begin
             stallreq_for_div = `NoStop;
@@ -202,8 +328,32 @@ module EX(
             endcase
         end
     end
+    
+    assign lo_i = w_lo_we1 ? mul_result[31:0]:
+                   w_lo_we2 ?div_result[31:0]:
+                   w_lo_we3 ? rf_rdata1:
+                    32'b0;
+    assign hi_i = w_hi_we1 ? mul_result[63:32]:
+                   w_hi_we2 ? div_result[63:32]:
+                   w_hi_we3 ? rf_rdata1:
+                    32'b0;
+    assign w_hi_we = w_hi_we1 | w_hi_we2 | w_hi_we3;
+    assign w_lo_we = w_lo_we1 | w_lo_we2 | w_lo_we3;
+    //传递给mem的额外信号
+    assign ex_to_mem1 =
+    {
+        w_hi_we,
+        w_lo_we,
+        hi_i,
+        lo_i
+    };
+    //传递回id的额外信号
+    assign ex_to_id_2=
+    {
+        w_hi_we,
+        w_lo_we,
+        hi_i,
+        lo_i
+    };
 
-    // mul_result 和 div_result 可以直接使用
-    
-    
 endmodule
