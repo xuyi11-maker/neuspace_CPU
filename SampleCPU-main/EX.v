@@ -162,7 +162,7 @@ module EX(
     assign w_hi_we1 = mult | multu ;//高位寄存器写使能
     assign w_lo_we1 = mult | multu ;
     
-    // 乘法器逻辑
+    // 乘法器逻辑，移位，每一个周期被乘数左移（*2），乘数右移（/2），通过拼接操作和累加操作完成。
     reg judge;//状态判断
     reg [31:0] multiplier;
     wire [63:0] temporary_value;
